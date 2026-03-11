@@ -49,8 +49,13 @@ export class TelegramService implements OnModuleInit {
 
     const message = update.message || update.edited_message;
 
-    if (!message?.text || !message.from) {
-      this.logger.debug("Update has no text message, skipping");
+    if (!message || (!message.text && !message.photo)) {
+      this.logger.debug("Update has no text or photo, skipping");
+      return;
+    }
+
+    if (!message.from) {
+      this.logger.debug("Update has no from user, skipping");
       return;
     }
 
@@ -58,12 +63,14 @@ export class TelegramService implements OnModuleInit {
   }
 
   /**
-   * Handle a text message
+   * Handle a message (text or photo)
    */
   private async handleMessage(message: TelegramMessage): Promise<void> {
-    const { text, from, chat } = message;
+    const { from, chat, photo } = message;
+    // If it's a photo caption, treat it as the text message
+    let text = message.text || message.caption || "";
 
-    if (!text || !from) return;
+    if (!from) return;
 
     try {
       // Check for commands first
@@ -101,14 +108,38 @@ export class TelegramService implements OnModuleInit {
       // 4. Fetch recent chat history for context
       const chatHistory = await this.getRecentChatHistory(user.id);
 
-      // 5. Analyze message with AI (with user context + chat history)
+      // 5. Download photo if present
+      let imageData;
+      if (photo && photo.length > 0) {
+        // The array is sorted by size, get the last (largest) one
+        const largestPhoto = photo[photo.length - 1];
+        try {
+          // Tell the user we received the image and are thinking
+          await this.sendMessage(chat.id, "📸 ¡Imagen recibida! Analizando...");
+          imageData = await this.downloadTelegramPhoto(largestPhoto.file_id);
+          // Ensure we have some text even if the user didn't write a caption
+          if (!text) {
+             text = "Analiza los datos de esta imagen para registrar métricas.";
+          }
+        } catch (error) {
+          this.logger.error(`Error downloading photo:`, error);
+          await this.sendMessage(
+            chat.id,
+            "Hubo un error al intentar leer imagen, por favor envíala de nuevo.",
+          );
+          return;
+        }
+      }
+
+      // 6. Analyze message with AI (with user context + chat history + image)
       const analysis = await this.intelligenceService.analyzeMessage(
         text,
         userContext,
         chatHistory,
+        imageData,
       );
 
-      // 6. Handle onboarding data if present
+      // 7. Handle onboarding data if present
       if (analysis.intent === "onboarding" && analysis.onboardingData) {
         await this.handleOnboardingData(user.id, analysis.onboardingData);
       }
@@ -324,6 +355,38 @@ export class TelegramService implements OnModuleInit {
       this.logger.error("Error logging conversation:", error);
       // Don't throw - logging failure shouldn't break the main flow
     }
+  }
+
+  /**
+   * Download a photo from Telegram API and convert to Base64
+   */
+  private async downloadTelegramPhoto(
+    fileId: string,
+  ): Promise<{ buffer: Buffer; mimeType: string }> {
+    // 1. Get the file path from the file_id
+    const fileResponse = await fetch(
+      `${this.TELEGRAM_API}${this.botToken}/getFile?file_id=${fileId}`,
+    );
+    const fileData = await fileResponse.json();
+
+    if (!fileData.ok) {
+      throw new Error(`Failed to get file info: ${fileData.description}`);
+    }
+
+    const filePath = fileData.result.file_path;
+
+    // 2. Download the actual file buffer
+    const downloadUrl = `https://api.telegram.org/file/bot${this.botToken}/${filePath}`;
+    const downloadResponse = await fetch(downloadUrl);
+    
+    if (!downloadResponse.ok) {
+        throw new Error(`Failed to download file from ${downloadUrl}`);
+    }
+
+    const arrayBuffer = await downloadResponse.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    return { buffer, mimeType: "image/jpeg" }; // Telegram photos are always JPEG
   }
 
   /**

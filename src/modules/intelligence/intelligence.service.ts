@@ -113,19 +113,34 @@ export class IntelligenceService implements OnModuleInit {
 
   /**
    * Analyze a user message and extract intent + metrics
-   * Uses Groq as primary, falls back to Gemini
+   * Uses Groq as primary for text, but routes directly to Gemini for images
    */
   async analyzeMessage(
     text: string,
     userContext?: UserContext,
     chatHistory?: ChatHistoryEntry[],
+    image?: { buffer: Buffer; mimeType: string },
   ): Promise<AnalysisResult> {
     const systemPrompt = getSystemPrompt(userContext);
 
     // Build conversation context from chat history
     const historyContext = this.buildHistoryContext(chatHistory);
 
-    // Try Groq first (primary)
+    // Route direct to Gemini if there's an image
+    if (image && this.geminiModel) {
+      try {
+        this.logger.debug("Image detected, routing directly to Gemini Vision");
+        return await this.callGemini(text, systemPrompt, historyContext, image);
+      } catch (error) {
+        this.logger.error(`Gemini Vision failed: ${error}`);
+        return this.createFallbackResponse(text);
+      }
+    } else if (image && !this.geminiModel) {
+      this.logger.error("Image received but Gemini API is not configured");
+      return this.createFallbackResponse(text);
+    }
+
+    // Default flow for text: Try Groq first (primary)
     if (this.groqClient) {
       try {
         const result = await this.callGroq(text, systemPrompt, historyContext);
@@ -200,12 +215,13 @@ export class IntelligenceService implements OnModuleInit {
   }
 
   /**
-   * Call Gemini API
+   * Call Gemini API (Supports text and image multimodal)
    */
   private async callGemini(
     text: string,
     systemPrompt: string,
     historyContext: string,
+    image?: { buffer: Buffer; mimeType: string },
   ): Promise<AnalysisResult> {
     const fullPrompt = historyContext
       ? `${systemPrompt}\n\n## HISTORIAL DE CONVERSACIÓN RECIENTE:\n${historyContext}`
@@ -228,7 +244,18 @@ export class IntelligenceService implements OnModuleInit {
       ],
     });
 
-    const result = await chat.sendMessage(text);
+    const userMessageParts: any[] = [{ text }];
+
+    if (image) {
+      userMessageParts.push({
+        inlineData: {
+          data: image.buffer.toString("base64"),
+          mimeType: image.mimeType,
+        },
+      });
+    }
+
+    const result = await chat.sendMessage(userMessageParts);
     let responseText = result.response.text();
 
     this.logger.debug(`Gemini raw response: ${responseText}`);
