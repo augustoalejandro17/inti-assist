@@ -85,7 +85,7 @@ export class IntelligenceService implements OnModuleInit {
     // Initialize Gemini (fallback)
     const geminiApiKey = this.configService.get<string>("gemini.apiKey");
     const geminiModelName =
-      this.configService.get<string>("gemini.model") || "gemini-2.0-flash";
+      this.configService.get<string>("gemini.model") || "gemini-1.5-flash";
 
     if (geminiApiKey) {
       const genAI = new GoogleGenerativeAI(geminiApiKey);
