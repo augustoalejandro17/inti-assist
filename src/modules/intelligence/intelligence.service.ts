@@ -113,7 +113,7 @@ export class IntelligenceService implements OnModuleInit {
 
   /**
    * Analyze a user message and extract intent + metrics
-   * Uses Groq as primary for text, but routes directly to Gemini for images
+   * Uses Groq as primary for text AND images, falls back to Gemini
    */
   async analyzeMessage(
     text: string,
@@ -126,24 +126,10 @@ export class IntelligenceService implements OnModuleInit {
     // Build conversation context from chat history
     const historyContext = this.buildHistoryContext(chatHistory);
 
-    // Route direct to Gemini if there's an image
-    if (image && this.geminiModel) {
-      try {
-        this.logger.debug("Image detected, routing directly to Gemini Vision");
-        return await this.callGemini(text, systemPrompt, historyContext, image);
-      } catch (error) {
-        this.logger.error(`Gemini Vision failed: ${error}`);
-        return this.createFallbackResponse(text);
-      }
-    } else if (image && !this.geminiModel) {
-      this.logger.error("Image received but Gemini API is not configured");
-      return this.createFallbackResponse(text);
-    }
-
-    // Default flow for text: Try Groq first (primary)
+    // Primary flow: Try Groq first for everything (text & image)
     if (this.groqClient) {
       try {
-        const result = await this.callGroq(text, systemPrompt, historyContext);
+        const result = await this.callGroq(text, systemPrompt, historyContext, image);
         this.logger.debug("Response from: Groq ✓");
         return result;
       } catch (error) {
@@ -182,8 +168,9 @@ export class IntelligenceService implements OnModuleInit {
     text: string,
     systemPrompt: string,
     historyContext: string,
+    image?: { buffer: Buffer; mimeType: string },
   ): Promise<AnalysisResult> {
-    const messages: Groq.Chat.ChatCompletionMessageParam[] = [
+    const messages: any[] = [
       { role: "system", content: systemPrompt },
     ];
 
@@ -195,15 +182,39 @@ export class IntelligenceService implements OnModuleInit {
       });
     }
 
-    messages.push({ role: "user", content: text });
+    if (image) {
+      messages.push({
+        role: "user",
+        content: [
+          { type: "text", text },
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:${image.mimeType};base64,${image.buffer.toString("base64")}`,
+            },
+          },
+        ],
+      });
+    } else {
+      messages.push({ role: "user", content: text });
+    }
 
-    const completion = await this.groqClient!.chat.completions.create({
-      model: this.groqModel,
+    const modelToUse = image ? "llama-3.2-90b-vision-preview" : this.groqModel;
+
+    const completionObj: any = {
+      model: modelToUse,
       messages,
       temperature: 0.7,
       max_tokens: 1024,
-      response_format: { type: "json_object" },
-    });
+    };
+
+    // Vision models in Groq might not fully support response_format json_object yet
+    // The robust parser will still extract it properly.
+    if (!image) {
+      completionObj.response_format = { type: "json_object" };
+    }
+
+    const completion = await this.groqClient!.chat.completions.create(completionObj);
 
     const responseText = completion.choices[0]?.message?.content;
     if (!responseText) {
